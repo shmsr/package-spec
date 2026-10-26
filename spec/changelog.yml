@@ -8,7 +8,7 @@
     - description: Add support for semantic_text field definition.
       type: enhancement
       link: https://github.com/elastic/package-spec/pull/807
-    - description: Validate Alerting v2 rule template structure as a semantic rule (SVR00014).
+    - description: Validate Alerting v2 rule template structure as a semantic rule (SVR00014). Packages with a format_version below 3.8.0 get warnings instead of errors.
       type: enhancement
       link: https://github.com/elastic/package-spec/pull/1273
 - version: 3.7.0

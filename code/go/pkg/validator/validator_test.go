@@ -771,6 +771,38 @@ func Test_ValidateFromPath_badAlertRuleTemplatesV2(t *testing.T) {
 	})
 }
 
+// Test_ValidateFromPath_alertRuleTemplatesV2Warning checks that SVR00014 is a
+// warning before format_version 3.8.0, so already-published packages keep
+// validating.
+func Test_ValidateFromPath_alertRuleTemplatesV2Warning(t *testing.T) {
+	pkgRootPath := filepath.Join(t.TempDir(), "bad_alert_rule_templates_v2")
+	require.NoError(t, os.CopyFS(pkgRootPath, os.DirFS(filepath.Join("..", "..", "..", "..", "test", "packages", "bad_alert_rule_templates_v2"))))
+	manifestPath := filepath.Join(pkgRootPath, "manifest.yml")
+	manifest, err := os.ReadFile(manifestPath)
+	require.NoError(t, err)
+	manifest = []byte(strings.Replace(string(manifest), "format_version: 3.8.0", "format_version: 3.7.0", 1))
+	require.NoError(t, os.WriteFile(manifestPath, manifest, 0o644))
+
+	countTemplateErrors := func(err error) int {
+		verrs, _ := err.(specerrors.ValidationErrors)
+		count := 0
+		for _, verr := range verrs {
+			if verr.Code() == specerrors.CodeAlertRuleTemplateValidation {
+				count++
+			}
+		}
+		return count
+	}
+
+	validator, err := New(LegacyMode, WithWarningsAsErrors(false))
+	require.NoError(t, err)
+	assert.Zero(t, countTemplateErrors(validator.ValidateFromPath(pkgRootPath)))
+
+	validator, err = New(LegacyMode, WithWarningsAsErrors(true))
+	require.NoError(t, err)
+	assert.Equal(t, 6, countTemplateErrors(validator.ValidateFromPath(pkgRootPath)))
+}
+
 func TestValidateItemNotAllowed(t *testing.T) {
 	tests := map[string]map[string][]string{
 		"wrong_kibana_filename": {

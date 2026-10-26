@@ -254,6 +254,9 @@ Schema but is rejected by Elasticsearch.
 
 [SVR00014]: #svr00014---alerting-v2-rule-template-structure-is-invalid
 
+**Available since 3.8.0.** Packages with an earlier `format_version` get these problems
+as warnings.
+
 This rule checks Alerting v2 templates in `kibana/alerting_rule_template/`. A template
 is Alerting v2 when it sets `"engine": "v2"`.
 
@@ -273,7 +276,11 @@ What is checked in a v2 template:
   limits.
 - The alert lifecycle. Alert rules must set `recovery` and `no_data`. Signal rules must
   not set `recovery`, `no_data`, `state_transition`, or `metadata.routing_tags`.
-- `rule.state_transition`, `rule.grouping`, and `rule.artifacts`.
+- `rule.state_transition`, `rule.grouping`, and `rule.artifacts`, including the limits on
+  artifact `id`, `type`, and `data`.
+- Strings are checked the way Kibana checks them. Only `metadata.description`,
+  `metadata.builder.type`, and ES|QL queries and segments must contain more than
+  whitespace.
 
 What is not checked:
 
