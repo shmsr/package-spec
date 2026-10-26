@@ -39,21 +39,27 @@ import (
 // already report them.
 
 const (
-	templateIDMax          = 150
-	templateNameMax        = 256
-	templateDescriptionMax = 1024
-	templateTagMax         = 128
-	templateTagsMax        = 20
-	templateQueryMax       = 10000
-	templateFieldMax       = 256
-	templateGroupingMax    = 16
-	templatePhaseCountMax  = 1000
-	templateArtifactsMax   = 100
-	templateRunbookMax     = 50000
-	templateDashboardIDMax = 1024
-	templateBuilderTypeMax = 64
-	templateMinScheduleMS  = int64(5 * 1000)
-	templateMaxDurationMS  = int64(365 * 24 * 60 * 60 * 1000)
+	templateIDMax             = 150
+	templateNameMax           = 256
+	templateDescriptionMax    = 1024
+	templateTagMax            = 128
+	templateTagsMax           = 20
+	templateQueryMax          = 10000
+	templateFieldMax          = 256
+	templateGroupingMax       = 16
+	templatePhaseCountMax     = 1000
+	templateArtifactsMax      = 100
+	templateRunbookMax        = 50000
+	templateDashboardIDMax    = 1024
+	templateBuilderTypeMax    = 64
+	templateArtifactTypeMax   = 128
+	templateArtifactFieldsMax = 32
+	// MAX_ARTIFACT_DATA_BYTES in alerting-v2-constants. Kibana compares it with
+	// the length of JSON.stringify(data).
+	templateArtifactDataMax = 2 * 65536
+	templateDurationLenMax  = 32
+	templateMinScheduleMS   = int64(5 * 1000)
+	templateMaxDurationMS   = int64(365 * 24 * 60 * 60 * 1000)
 )
 
 // Durations use Kibana's syntax, copied from DURATION_RE and DURATION_UNIT_TO_MS in
@@ -131,32 +137,26 @@ func validateAlertRuleTemplate(data []byte) error {
 	}
 
 	var doc struct {
-		ID         json.RawMessage `json:"id"`
-		Type       json.RawMessage `json:"type"`
-		Attributes struct {
-			Rule json.RawMessage `json:"rule"`
-		} `json:"attributes"`
+		ID   json.RawMessage `json:"id"`
+		Type json.RawMessage `json:"type"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return err
 	}
+	attributes, _ := jsonObject(envelope.Attributes)
 
 	var problems templateProblems
 	id := jsonString(doc.ID)
-	if strings.TrimSpace(id) == "" || templateStringLength(id) > templateIDMax {
+	if id == "" || templateStringLength(id) > templateIDMax {
 		problems.add("id is required and must be at most %d characters", templateIDMax)
 	}
 	if jsonString(doc.Type) != "alerting_rule_template" {
 		problems.add("type must be alerting_rule_template")
 	}
-	if jsonKind(doc.Attributes.Rule) != "object" {
+	rule, ok := jsonObject(attributes["rule"])
+	if !ok {
 		problems.add("rule must be an object")
 		return problems.err()
-	}
-
-	var rule map[string]json.RawMessage
-	if err := json.Unmarshal(doc.Attributes.Rule, &rule); err != nil {
-		return fmt.Errorf("invalid v2 alert rule template: rule must be an object")
 	}
 	kind := jsonString(rule["kind"])
 	if kind != "alert" && kind != "signal" {
@@ -201,7 +201,7 @@ func validateTemplateMetadata(kind string, raw json.RawMessage, problems *templa
 		return
 	}
 	name := jsonString(obj["name"])
-	if strings.TrimSpace(name) == "" || templateStringLength(name) > templateNameMax {
+	if name == "" || templateStringLength(name) > templateNameMax {
 		problems.add("rule.metadata.name is required and must be at most %d characters", templateNameMax)
 	}
 	if raw, exists := obj["description"]; exists {
@@ -239,7 +239,7 @@ func validateTemplateTags(field string, raw json.RawMessage, problems *templateP
 		problems.add("%s must contain 1 to %d items", field, templateTagsMax)
 	}
 	for _, tag := range tags {
-		if strings.TrimSpace(tag) == "" || templateStringLength(tag) > templateTagMax {
+		if tag == "" || templateStringLength(tag) > templateTagMax {
 			problems.add("%s entries must be non-empty strings of at most %d characters", field, templateTagMax)
 			return
 		}
@@ -268,7 +268,7 @@ func validateTemplateTimeField(raw json.RawMessage, problems *templateProblems) 
 		return
 	}
 	value := jsonString(raw)
-	if jsonKind(raw) != "string" || strings.TrimSpace(value) == "" || templateStringLength(value) > templateFieldMax {
+	if jsonKind(raw) != "string" || value == "" || templateStringLength(value) > templateFieldMax {
 		problems.add("rule.time_field must be a non-empty string of at most %d characters", templateFieldMax)
 	}
 }
@@ -350,6 +350,8 @@ func validateTemplateLifecycle(kind string, hasBreach bool, recoveryRaw, noDataR
 			segment := jsonString(recovery["segment"])
 			if jsonKind(recovery["segment"]) != "string" || strings.TrimSpace(segment) == "" {
 				problems.add("recovery condition requires segment")
+			} else if templateStringLength(segment) > templateQueryMax {
+				problems.add("recovery.segment exceeds %d characters", templateQueryMax)
 			}
 			if jsonPresent(recovery["query"]) {
 				problems.add("recovery condition does not take query")
@@ -358,6 +360,8 @@ func validateTemplateLifecycle(kind string, hasBreach bool, recoveryRaw, noDataR
 			query := jsonString(recovery["query"])
 			if jsonKind(recovery["query"]) != "string" || strings.TrimSpace(query) == "" {
 				problems.add("recovery query strategy requires query")
+			} else if templateStringLength(query) > templateQueryMax {
+				problems.add("recovery.query exceeds %d characters", templateQueryMax)
 			}
 			if jsonPresent(recovery["segment"]) {
 				problems.add("recovery query strategy does not take segment")
@@ -472,7 +476,7 @@ func validateTemplateGrouping(raw json.RawMessage, problems *templateProblems) {
 		problems.add("rule.grouping.fields must contain 1 to %d fields", templateGroupingMax)
 	}
 	for _, field := range fields {
-		if strings.TrimSpace(field) == "" || templateStringLength(field) > templateFieldMax {
+		if field == "" || templateStringLength(field) > templateFieldMax {
 			problems.add("rule.grouping.fields contains an empty or oversized field")
 			return
 		}
@@ -496,39 +500,74 @@ func validateTemplateArtifacts(raw json.RawMessage, problems *templateProblems) 
 		problems.add("rule.artifacts must contain 1 to %d items", templateArtifactsMax)
 	}
 	seen := map[string]struct{}{}
-	for _, artifact := range artifacts {
+	for i, artifact := range artifacts {
+		field := fmt.Sprintf("rule.artifacts[%d]", i)
 		id := jsonString(artifact["id"])
 		kind := jsonString(artifact["type"])
-		if strings.TrimSpace(id) == "" || jsonKind(artifact["type"]) != "string" || strings.TrimSpace(kind) == "" {
-			problems.add("rule.artifacts entries require id and type")
-			return
-		}
-		if _, exists := seen[id]; exists {
+		if id == "" || templateStringLength(id) > templateIDMax {
+			problems.add("%s.id is required and must be at most %d characters", field, templateIDMax)
+		} else if _, exists := seen[id]; exists {
 			problems.add("rule.artifacts ids must be unique")
-			return
 		}
 		seen[id] = struct{}{}
+		if kind == "" || templateStringLength(kind) > templateArtifactTypeMax {
+			problems.add("%s.type is required and must be at most %d characters", field, templateArtifactTypeMax)
+		}
 		data, ok := jsonObject(artifact["data"])
 		if !ok {
-			problems.add("rule.artifacts data must be an object")
-			return
+			problems.add("%s.data must be an object", field)
+			continue
 		}
-		switch kind {
-		case "runbook":
-			content := jsonString(data["content"])
-			if jsonKind(data["content"]) != "string" || strings.TrimSpace(content) == "" || templateStringLength(content) > templateRunbookMax {
-				problems.add("runbook artifact data.content must be a non-empty string")
-			}
-		case "dashboard":
-			if _, exists := data["dashboardId"]; exists {
-				problems.add("dashboard artifact data.dashboardId is not accepted; use dashboard_id")
-			}
-			dashboardID := jsonString(data["dashboard_id"])
-			if jsonKind(data["dashboard_id"]) != "string" || strings.TrimSpace(dashboardID) == "" || templateStringLength(dashboardID) > templateDashboardIDMax {
-				problems.add("dashboard artifact data.dashboard_id is required")
-			}
+		validateTemplateArtifactData(field, kind, artifact["data"], data, problems)
+	}
+}
+
+func validateTemplateArtifactData(field, kind string, raw json.RawMessage, data map[string]json.RawMessage, problems *templateProblems) {
+	if len(data) > templateArtifactFieldsMax {
+		problems.add("%s.data must have at most %d fields", field, templateArtifactFieldsMax)
+	}
+	for key := range data {
+		if key == "" || templateStringLength(key) > templateFieldMax {
+			problems.add("%s.data keys must be 1 to %d characters", field, templateFieldMax)
+			break
 		}
 	}
+	if templateJSONLength(raw) > templateArtifactDataMax {
+		problems.add("%s.data must not exceed %d characters when serialized", field, templateArtifactDataMax)
+	}
+	switch kind {
+	case "runbook":
+		content := jsonString(data["content"])
+		if jsonKind(data["content"]) != "string" || strings.TrimSpace(content) == "" || templateStringLength(content) > templateRunbookMax {
+			problems.add("runbook artifact data.content must be a non-empty string")
+		}
+	case "dashboard":
+		if _, exists := data["dashboardId"]; exists {
+			problems.add("dashboard artifact data.dashboardId is not accepted; use dashboard_id")
+		}
+		dashboardID := jsonString(data["dashboard_id"])
+		if jsonKind(data["dashboard_id"]) != "string" || strings.TrimSpace(dashboardID) == "" || templateStringLength(dashboardID) > templateDashboardIDMax {
+			problems.add("dashboard artifact data.dashboard_id is required")
+		}
+	}
+}
+
+// templateJSONLength approximates the JavaScript length of JSON.stringify for
+// the given JSON: compact output, with non-ASCII characters left unescaped.
+func templateJSONLength(raw json.RawMessage) int {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return 0
+	}
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return 0
+	}
+	return templateStringLength(strings.TrimSuffix(buf.String(), "\n"))
 }
 
 // templateStringLength matches JavaScript String.length, which Kibana's schemas
@@ -545,6 +584,9 @@ func templateStringLength(value string) int {
 }
 
 func parseTemplateDuration(value string) (int64, error) {
+	if len(value) > templateDurationLenMax {
+		return 0, fmt.Errorf("%q is longer than %d characters", value, templateDurationLenMax)
+	}
 	match := templateDurationPattern.FindStringSubmatch(value)
 	if match == nil {
 		return 0, fmt.Errorf("%q is not a duration", value)

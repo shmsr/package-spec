@@ -210,6 +210,21 @@ func TestV2TemplateStringLimits(t *testing.T) {
 		{"dashboard", 1024, func(doc map[string]any, value string) {
 			templateRule(doc)["artifacts"] = []any{map[string]any{"id": "dashboard", "type": "dashboard", "data": map[string]any{"dashboard_id": value}}}
 		}},
+		{"recovery segment", 10000, func(doc map[string]any, value string) {
+			templateRule(doc)["recovery"] = map[string]any{"strategy": "condition", "segment": value}
+		}},
+		{"recovery query", 10000, func(doc map[string]any, value string) {
+			templateRule(doc)["recovery"] = map[string]any{"strategy": "query", "query": value}
+		}},
+		{"artifact id", 150, func(doc map[string]any, value string) {
+			templateRule(doc)["artifacts"] = []any{map[string]any{"id": value, "type": "custom", "data": map[string]any{}}}
+		}},
+		{"artifact type", 128, func(doc map[string]any, value string) {
+			templateRule(doc)["artifacts"] = []any{map[string]any{"id": "custom", "type": value, "data": map[string]any{}}}
+		}},
+		{"artifact data key", 256, func(doc map[string]any, value string) {
+			templateRule(doc)["artifacts"] = []any{map[string]any{"id": "custom", "type": "custom", "data": map[string]any{value: true}}}
+		}},
 	}
 	for _, field := range fields {
 		for _, character := range []string{"a", "é", "😀"} {
@@ -257,6 +272,26 @@ func TestV2TemplateDurationBounds(t *testing.T) {
 			})
 		}
 	}
+	// Kibana caps duration strings at 32 characters before parsing them.
+	for _, test := range []struct {
+		every string
+		valid bool
+	}{
+		{strings.Repeat("0", 30) + "1m", true},
+		{strings.Repeat("0", 31) + "1m", false},
+	} {
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal([]byte(validV2Template), &doc))
+		templateRule(doc)["schedule"].(map[string]any)["every"] = test.every
+		raw, err := json.Marshal(doc)
+		require.NoError(t, err)
+		if test.valid {
+			require.NoError(t, validateAlertRuleTemplate(raw))
+		} else {
+			require.ErrorContains(t, validateAlertRuleTemplate(raw), "schedule.every")
+		}
+	}
+
 	var doc map[string]any
 	require.NoError(t, json.Unmarshal([]byte(validV2Template), &doc))
 	templateRule(doc)["schedule"].(map[string]any)["every"] = "0s"
@@ -445,4 +480,79 @@ func TestV2TemplateNonemptyCollections(t *testing.T) {
 			require.ErrorContains(t, validateAlertRuleTemplate(raw), test.want)
 		})
 	}
+}
+
+func TestV2TemplateUntrimmedStrings(t *testing.T) {
+	// Kibana checks these with min(1) and no trim, so whitespace is a valid value.
+	for _, test := range []struct {
+		name string
+		edit func(map[string]any)
+	}{
+		{"id", func(doc map[string]any) { doc["id"] = " " }},
+		{"name", func(doc map[string]any) { templateRule(doc)["metadata"].(map[string]any)["name"] = " " }},
+		{"tag", func(doc map[string]any) { templateRule(doc)["metadata"].(map[string]any)["tags"] = []string{" "} }},
+		{"time_field", func(doc map[string]any) { templateRule(doc)["time_field"] = " " }},
+		{"grouping", func(doc map[string]any) { templateRule(doc)["grouping"] = map[string]any{"fields": []string{" "}} }},
+		{"artifact", func(doc map[string]any) {
+			templateRule(doc)["artifacts"] = []any{map[string]any{"id": " ", "type": " ", "data": map[string]any{" ": true}}}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal([]byte(validV2Template), &doc))
+			test.edit(doc)
+			raw, err := json.Marshal(doc)
+			require.NoError(t, err)
+			require.NoError(t, validateAlertRuleTemplate(raw))
+		})
+	}
+}
+
+func TestV2TemplateArtifactData(t *testing.T) {
+	fields := func(count int) map[string]any {
+		data := map[string]any{}
+		for i := range count {
+			data[fmt.Sprintf("field%d", i)] = true
+		}
+		return data
+	}
+	for _, test := range []struct {
+		name string
+		data map[string]any
+		want string
+	}{
+		{"field limit", fields(32), ""},
+		{"too many fields", fields(33), "rule.artifacts[0].data must have at most 32 fields"},
+		{"empty key", map[string]any{"": true}, "rule.artifacts[0].data keys must be 1 to 256 characters"},
+		// {"value":"…"} adds 12 characters around the string.
+		{"serialized limit", map[string]any{"value": strings.Repeat("é", 131072-12)}, ""},
+		{"serialized too long", map[string]any{"value": strings.Repeat("é", 131072-11)}, "must not exceed 131072 characters when serialized"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal([]byte(validV2Template), &doc))
+			templateRule(doc)["artifacts"] = []any{map[string]any{"id": "custom", "type": "custom", "data": test.data}}
+			raw, err := json.Marshal(doc)
+			require.NoError(t, err)
+			if test.want == "" {
+				require.NoError(t, validateAlertRuleTemplate(raw))
+			} else {
+				require.ErrorContains(t, validateAlertRuleTemplate(raw), test.want)
+			}
+		})
+	}
+}
+
+func TestV2TemplateReportsEveryArtifact(t *testing.T) {
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal([]byte(validV2Template), &doc))
+	templateRule(doc)["artifacts"] = []any{
+		map[string]any{"id": "", "type": "runbook", "data": map[string]any{"content": "Investigate."}},
+		map[string]any{"id": "dash", "type": "dashboard", "data": map[string]any{"dashboardId": "abc"}},
+	}
+	raw, err := json.Marshal(doc)
+	require.NoError(t, err)
+	err = validateAlertRuleTemplate(raw)
+	require.ErrorContains(t, err, "rule.artifacts[0].id is required")
+	require.ErrorContains(t, err, "dashboard artifact data.dashboardId is not accepted")
 }
