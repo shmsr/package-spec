@@ -476,6 +476,13 @@ func TestAlertRuleTemplatesV2FormatVersion(t *testing.T) {
 	require.ErrorContains(t, errs[0], filepath.Join(dir, "v2.json"))
 	require.ErrorContains(t, errs[0], "format_version 3.7.0")
 	require.Empty(t, errs[0].Code())
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "v3.json"), []byte(`{"id":"v3","type":"alerting_rule_template","attributes":{"engine":"v3"}}`), 0o644))
+	errs = ValidateAlertRuleTemplatesV2FormatVersion(fspath.DirFS(root))
+	require.Len(t, errs, 2)
+	require.ErrorContains(t, errs[1], filepath.Join(dir, "v3.json"))
+	require.ErrorContains(t, errs[1], `unsupported alert template engine "v3"`)
+	require.Empty(t, errs[1].Code())
 }
 
 func TestV2TemplateNonemptyCollections(t *testing.T) {

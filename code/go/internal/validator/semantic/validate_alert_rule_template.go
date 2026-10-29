@@ -100,11 +100,12 @@ const alertRuleTemplateFiles = "kibana/alerting_rule_template/*.json"
 // Kibana 9.6.0, the first Kibana that installs Alerting v2 templates.
 const alertingV2MinFormatVersion = "3.7.0"
 
-// ValidateAlertRuleTemplatesV2FormatVersion rejects Alerting v2 templates in
-// packages whose format_version is older than alertingV2MinFormatVersion. Kibana
-// before 9.6.0 fails to install them, and the registry offers those packages
-// only to Kibana versions that support their format_version. The error has no
-// code so validation.yml cannot exclude it.
+// ValidateAlertRuleTemplatesV2FormatVersion rejects Alerting v2 templates, and
+// templates with an unsupported engine, in packages whose format_version is
+// older than alertingV2MinFormatVersion. Kibana before 9.6.0 fails to install
+// them, and the registry offers those packages only to Kibana versions that
+// support their format_version. The errors have no code so validation.yml
+// cannot exclude them.
 func ValidateAlertRuleTemplatesV2FormatVersion(root fspath.FS) specerrors.ValidationErrors {
 	files, err := fs.Glob(root, alertRuleTemplateFiles)
 	if err != nil {
@@ -123,10 +124,16 @@ func ValidateAlertRuleTemplatesV2FormatVersion(root fspath.FS) specerrors.Valida
 		if err := json.Unmarshal(data, &envelope); err != nil {
 			continue
 		}
-		if engine, ok := alertRuleEngineString(envelope.Attributes); ok && engine == "v2" {
+		engine, ok := alertRuleEngineString(envelope.Attributes)
+		switch {
+		case !ok || engine == "" || engine == "v1":
+		case engine == "v2":
 			errs = append(errs, specerrors.NewStructuredErrorf(
 				"file \"%s\" is invalid: Alerting v2 rule templates (engine v2) require format_version %s or later",
 				root.Path(file), alertingV2MinFormatVersion))
+		default:
+			errs = append(errs, specerrors.NewStructuredErrorf(
+				"file \"%s\" is invalid: unsupported alert template engine %q", root.Path(file), engine))
 		}
 	}
 	return errs

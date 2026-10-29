@@ -255,8 +255,8 @@ Schema but is rejected by Elasticsearch.
 [SVR00014]: #svr00014---alerting-v2-rule-template-structure-is-invalid
 
 **Available since 3.7.0.** Packages with an earlier `format_version` cannot ship Alerting
-v2 templates: every `"engine": "v2"` template is reported as an error that
-`validation.yml` cannot exclude. Kibana 9.6.0 is the first version that installs Alerting
+v2 templates: every `"engine": "v2"` template, and every template with an engine other
+than `""` or `"v1"`, is reported as an error that `validation.yml` cannot exclude. Kibana 9.6.0 is the first version that installs Alerting
 v2 templates and the first that supports `format_version` 3.7.0, so the package registry
 does not offer these packages to older Kibana versions, where installing them fails.
 
