@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -771,36 +772,32 @@ func Test_ValidateFromPath_badAlertRuleTemplatesV2(t *testing.T) {
 	})
 }
 
-// Test_ValidateFromPath_alertRuleTemplatesV2Warning checks that SVR00014 is a
-// warning before format_version 3.8.0, so already-published packages keep
-// validating.
-func Test_ValidateFromPath_alertRuleTemplatesV2Warning(t *testing.T) {
-	pkgRootPath := filepath.Join(t.TempDir(), "bad_alert_rule_templates_v2")
-	require.NoError(t, os.CopyFS(pkgRootPath, os.DirFS(filepath.Join("..", "..", "..", "..", "test", "packages", "bad_alert_rule_templates_v2"))))
+// Test_ValidateFromPath_alertRuleTemplatesV2FormatVersion checks that Alerting
+// v2 templates are rejected before format_version 3.7.0, while classic
+// templates in the same package are not.
+func Test_ValidateFromPath_alertRuleTemplatesV2FormatVersion(t *testing.T) {
+	pkgRootPath := filepath.Join(t.TempDir(), "good_alert_rule_templates_v2")
+	require.NoError(t, os.CopyFS(pkgRootPath, os.DirFS(filepath.Join("..", "..", "..", "..", "test", "packages", "good_alert_rule_templates_v2"))))
 	manifestPath := filepath.Join(pkgRootPath, "manifest.yml")
 	manifest, err := os.ReadFile(manifestPath)
 	require.NoError(t, err)
-	manifest = []byte(strings.Replace(string(manifest), "format_version: 3.8.0", "format_version: 3.7.0", 1))
+	manifest = []byte(strings.Replace(string(manifest), "format_version: 3.7.0", "format_version: 3.6.0", 1))
 	require.NoError(t, os.WriteFile(manifestPath, manifest, 0o644))
 
-	countTemplateErrors := func(err error) int {
-		verrs, _ := err.(specerrors.ValidationErrors)
-		count := 0
-		for _, verr := range verrs {
-			if verr.Code() == specerrors.CodeAlertRuleTemplateValidation {
-				count++
-			}
-		}
-		return count
+	validator, err := New(LegacyMode)
+	require.NoError(t, err)
+	verrs, ok := validator.ValidateFromPath(pkgRootPath).(specerrors.ValidationErrors)
+	require.True(t, ok)
+	var messages []string
+	for _, verr := range verrs {
+		messages = append(messages, verr.Error())
 	}
-
-	validator, err := New(LegacyMode, WithWarningsAsErrors(false))
-	require.NoError(t, err)
-	assert.Zero(t, countTemplateErrors(validator.ValidateFromPath(pkgRootPath)))
-
-	validator, err = New(LegacyMode, WithWarningsAsErrors(true))
-	require.NoError(t, err)
-	assert.Equal(t, 6, countTemplateErrors(validator.ValidateFromPath(pkgRootPath)))
+	require.Len(t, messages, 2, messages)
+	for _, file := range []string{"alert-rule.json", "signal-rule.json"} {
+		assert.True(t, slices.ContainsFunc(messages, func(message string) bool {
+			return strings.Contains(message, file+`" is invalid: Alerting v2 rule templates (engine v2) require format_version 3.7.0 or later`)
+		}), "no format_version error for %s in %v", file, messages)
+	}
 }
 
 func TestValidateItemNotAllowed(t *testing.T) {

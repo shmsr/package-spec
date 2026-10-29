@@ -462,6 +462,22 @@ func TestAlertRuleTemplateSemanticRule(t *testing.T) {
 	require.ErrorContains(t, errs[0], filepath.Join(dir, "invalid.json"))
 }
 
+func TestAlertRuleTemplatesV2FormatVersion(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "kibana", "alerting_rule_template")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "classic.json"), []byte(`{"id":"classic","type":"alerting_rule_template","attributes":{"engine":"v1","name":"Classic"}}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "truncated.json"), []byte(`{"id": "truncated",`), 0o644))
+	require.Empty(t, ValidateAlertRuleTemplatesV2FormatVersion(fspath.DirFS(root)))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "v2.json"), []byte(`{"id":"v2","type":"alerting_rule_template","attributes":{"engine":"v2"}}`), 0o644))
+	errs := ValidateAlertRuleTemplatesV2FormatVersion(fspath.DirFS(root))
+	require.Len(t, errs, 1)
+	require.ErrorContains(t, errs[0], filepath.Join(dir, "v2.json"))
+	require.ErrorContains(t, errs[0], "format_version 3.7.0")
+	require.Empty(t, errs[0].Code())
+}
+
 func TestV2TemplateNonemptyCollections(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -540,6 +556,63 @@ func TestV2TemplateArtifactData(t *testing.T) {
 				require.ErrorContains(t, validateAlertRuleTemplate(raw), test.want)
 			}
 		})
+	}
+}
+
+func TestV2TemplateJavaScriptWhitespace(t *testing.T) {
+	// Kibana trims with String.prototype.trim, which strips U+FEFF but not U+0085.
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"next line is not whitespace", "\u0085", ""},
+		{"byte order mark is whitespace", "\uFEFF", "metadata.description"},
+		{"no-break space is whitespace", "\u00A0\u2028", "metadata.description"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal([]byte(validV2Template), &doc))
+			templateRule(doc)["metadata"].(map[string]any)["description"] = test.value
+			raw, err := json.Marshal(doc)
+			require.NoError(t, err)
+			if test.want == "" {
+				require.NoError(t, validateAlertRuleTemplate(raw))
+			} else {
+				require.ErrorContains(t, validateAlertRuleTemplate(raw), test.want)
+			}
+		})
+	}
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal([]byte(validV2Template), &doc))
+	templateRule(doc)["query"].(map[string]any)["breach"] = map[string]any{"segment": "\uFEFF"}
+	raw, err := json.Marshal(doc)
+	require.NoError(t, err)
+	require.ErrorContains(t, validateAlertRuleTemplate(raw), "rule.query.breach.segment is required")
+}
+
+func TestTemplateJSONLength(t *testing.T) {
+	// Expected values are JSON.stringify(JSON.parse(raw)).length from Node.js.
+	for raw, want := range map[string]int{
+		`{"v":"\u2028"}`:           9,
+		`{"n":1e21}`:               11,
+		`{"n":1.000}`:              7,
+		`{"n":1e20}`:               27,
+		`{"s":"\ud800"}`:           14,
+		`{"s":"\ud83d\ude00"}`:     10,
+		`{"a":1,"a":2}`:            7,
+		`{"s":"a\u0001\n\"\/"}`:    20,
+		`[1, true, null, -0.5e-7]`: 19,
+		`{"n":1e400}`:              10,
+		`{"n":0.000001}`:           14,
+		`{"n":1e-7}`:               10,
+		`{"n":-0}`:                 7,
+		`{"n":123.456e5}`:          14,
+		`{"n":5e-324}`:             12,
+		`{ "k\tey" : "é" }`:        13,
+	} {
+		require.Equal(t, want, templateJSONLength(json.RawMessage(raw)), raw)
 	}
 }
 

@@ -254,8 +254,11 @@ Schema but is rejected by Elasticsearch.
 
 [SVR00014]: #svr00014---alerting-v2-rule-template-structure-is-invalid
 
-**Available since 3.8.0.** Packages with an earlier `format_version` get these problems
-as warnings.
+**Available since 3.7.0.** Packages with an earlier `format_version` cannot ship Alerting
+v2 templates: every `"engine": "v2"` template is reported as an error that
+`validation.yml` cannot exclude. Kibana 9.6.0 is the first version that installs Alerting
+v2 templates and the first that supports `format_version` 3.7.0, so the package registry
+does not offer these packages to older Kibana versions, where installing them fails.
 
 This rule checks Alerting v2 templates in `kibana/alerting_rule_template/`. A template
 is Alerting v2 when it sets `"engine": "v2"`.
@@ -279,8 +282,10 @@ What is checked in a v2 template:
 - `rule.state_transition`, `rule.grouping`, and `rule.artifacts`, including the limits on
   artifact `id`, `type`, and `data`.
 - Strings are checked the way Kibana checks them. Only `metadata.description`,
-  `metadata.builder.type`, and ES|QL queries and segments must contain more than
-  whitespace.
+  `metadata.builder.type`, runbook and dashboard artifact values, and ES|QL queries and
+  segments must contain more than whitespace, where whitespace is what JavaScript's
+  `trim()` removes. Lengths are counted in UTF-16 code units, and the size of artifact
+  `data` is the length of `JSON.stringify(data)`.
 
 What is not checked:
 

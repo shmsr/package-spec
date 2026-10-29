@@ -1,4 +1,4 @@
-format_version: 3.6.0
+format_version: 3.7.0
 name: good_alert_rule_templates_v2
 title: "Good Alert Rule Templates v2"
 version: 1.0.0
@@ -6,7 +6,7 @@ description: "This package contains valid Alerting v2 rule templates and a class
 type: integration
 conditions:
   kibana:
-    version: "^9.4.0"
+    version: "^9.6.0"
   elastic:
     subscription: "basic"
 owner:

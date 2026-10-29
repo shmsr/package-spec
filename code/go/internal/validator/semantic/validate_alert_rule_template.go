@@ -13,6 +13,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/elastic/package-spec/v3/code/go/internal/fspath"
 	"github.com/elastic/package-spec/v3/code/go/pkg/specerrors"
@@ -91,10 +94,48 @@ func (p templateProblems) err() error {
 	return fmt.Errorf("invalid v2 alert rule template: %s", strings.Join(p, "; "))
 }
 
+const alertRuleTemplateFiles = "kibana/alerting_rule_template/*.json"
+
+// alertingV2MinFormatVersion is the first package format_version supported by
+// Kibana 9.6.0, the first Kibana that installs Alerting v2 templates.
+const alertingV2MinFormatVersion = "3.7.0"
+
+// ValidateAlertRuleTemplatesV2FormatVersion rejects Alerting v2 templates in
+// packages whose format_version is older than alertingV2MinFormatVersion. Kibana
+// before 9.6.0 fails to install them, and the registry offers those packages
+// only to Kibana versions that support their format_version. The error has no
+// code so validation.yml cannot exclude it.
+func ValidateAlertRuleTemplatesV2FormatVersion(root fspath.FS) specerrors.ValidationErrors {
+	files, err := fs.Glob(root, alertRuleTemplateFiles)
+	if err != nil {
+		return specerrors.ValidationErrors{specerrors.NewStructuredErrorf("failed to list alert rule templates: %w", err)}
+	}
+	var errs specerrors.ValidationErrors
+	for _, file := range files {
+		data, err := fs.ReadFile(root, file)
+		if err != nil {
+			errs = append(errs, specerrors.NewStructuredErrorf("failed to read alert rule template %s: %w", root.Path(file), err))
+			continue
+		}
+		var envelope struct {
+			Attributes json.RawMessage `json:"attributes"`
+		}
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			continue
+		}
+		if engine, ok := alertRuleEngineString(envelope.Attributes); ok && engine == "v2" {
+			errs = append(errs, specerrors.NewStructuredErrorf(
+				"file \"%s\" is invalid: Alerting v2 rule templates (engine v2) require format_version %s or later",
+				root.Path(file), alertingV2MinFormatVersion))
+		}
+	}
+	return errs
+}
+
 // ValidateAlertRuleTemplates validates Alerting v2 template structure in all
 // package validation modes, including built package archives.
 func ValidateAlertRuleTemplates(root fspath.FS) specerrors.ValidationErrors {
-	files, err := fs.Glob(root, "kibana/alerting_rule_template/*.json")
+	files, err := fs.Glob(root, alertRuleTemplateFiles)
 	if err != nil {
 		return specerrors.ValidationErrors{specerrors.NewStructuredErrorf("failed to list alert rule templates: %w", err)}
 	}
@@ -206,7 +247,7 @@ func validateTemplateMetadata(kind string, raw json.RawMessage, problems *templa
 	}
 	if raw, exists := obj["description"]; exists {
 		description := jsonString(raw)
-		if jsonKind(raw) != "string" || strings.TrimSpace(description) == "" || templateStringLength(description) > templateDescriptionMax {
+		if jsonKind(raw) != "string" || isBlank(description) || templateStringLength(description) > templateDescriptionMax {
 			problems.add("rule.metadata.description must be a non-empty string of at most %d characters", templateDescriptionMax)
 		}
 	}
@@ -223,7 +264,7 @@ func validateTemplateMetadata(kind string, raw json.RawMessage, problems *templa
 	if raw, exists := obj["builder"]; exists {
 		builder, ok := jsonObject(raw)
 		builderType := jsonString(builder["type"])
-		if !ok || strings.TrimSpace(builderType) == "" || templateStringLength(builderType) > templateBuilderTypeMax {
+		if !ok || isBlank(builderType) || templateStringLength(builderType) > templateBuilderTypeMax {
 			problems.add("rule.metadata.builder must be an object with a non-empty type of at most %d characters", templateBuilderTypeMax)
 		}
 	}
@@ -283,7 +324,7 @@ func validateTemplateQuery(raw json.RawMessage, problems *templateProblems) bool
 		problems.add("rule.query.format is not part of Alerting v2; use query.base and optional query.breach.segment. Package validation does not parse ES|QL")
 	}
 	base := jsonString(obj["base"])
-	if jsonKind(obj["base"]) != "string" || strings.TrimSpace(base) == "" {
+	if jsonKind(obj["base"]) != "string" || isBlank(base) {
 		problems.add("rule.query.base is required")
 	} else if templateStringLength(base) > templateQueryMax {
 		problems.add("rule.query.base exceeds %d characters", templateQueryMax)
@@ -301,7 +342,7 @@ func validateTemplateQuery(raw json.RawMessage, problems *templateProblems) bool
 		problems.add("rule.query.breach uses query; Alerting v2 breach parts use segment. Package validation does not parse ES|QL")
 	}
 	segment := jsonString(breachObj["segment"])
-	if jsonKind(breachObj["segment"]) != "string" || strings.TrimSpace(segment) == "" {
+	if jsonKind(breachObj["segment"]) != "string" || isBlank(segment) {
 		problems.add("rule.query.breach.segment is required")
 	} else if templateStringLength(segment) > templateQueryMax {
 		problems.add("rule.query.breach.segment exceeds %d characters", templateQueryMax)
@@ -348,7 +389,7 @@ func validateTemplateLifecycle(kind string, hasBreach bool, recoveryRaw, noDataR
 				problems.add("recovery condition requires query.breach")
 			}
 			segment := jsonString(recovery["segment"])
-			if jsonKind(recovery["segment"]) != "string" || strings.TrimSpace(segment) == "" {
+			if jsonKind(recovery["segment"]) != "string" || isBlank(segment) {
 				problems.add("recovery condition requires segment")
 			} else if templateStringLength(segment) > templateQueryMax {
 				problems.add("recovery.segment exceeds %d characters", templateQueryMax)
@@ -358,7 +399,7 @@ func validateTemplateLifecycle(kind string, hasBreach bool, recoveryRaw, noDataR
 			}
 		case "query":
 			query := jsonString(recovery["query"])
-			if jsonKind(recovery["query"]) != "string" || strings.TrimSpace(query) == "" {
+			if jsonKind(recovery["query"]) != "string" || isBlank(query) {
 				problems.add("recovery query strategy requires query")
 			} else if templateStringLength(query) > templateQueryMax {
 				problems.add("recovery.query exceeds %d characters", templateQueryMax)
@@ -380,7 +421,7 @@ func validateTemplateLifecycle(kind string, hasBreach bool, recoveryRaw, noDataR
 		case "keep_last", "resolve":
 			if raw, exists := noData["query"]; exists {
 				query := jsonString(raw)
-				if jsonKind(raw) != "string" || strings.TrimSpace(query) == "" || templateStringLength(query) > templateQueryMax {
+				if jsonKind(raw) != "string" || isBlank(query) || templateStringLength(query) > templateQueryMax {
 					problems.add("no_data.query must be a non-empty string of at most %d characters", templateQueryMax)
 				}
 			}
@@ -538,7 +579,7 @@ func validateTemplateArtifactData(field, kind string, raw json.RawMessage, data 
 	switch kind {
 	case "runbook":
 		content := jsonString(data["content"])
-		if jsonKind(data["content"]) != "string" || strings.TrimSpace(content) == "" || templateStringLength(content) > templateRunbookMax {
+		if jsonKind(data["content"]) != "string" || isBlank(content) || templateStringLength(content) > templateRunbookMax {
 			problems.add("runbook artifact data.content must be a non-empty string")
 		}
 	case "dashboard":
@@ -546,28 +587,138 @@ func validateTemplateArtifactData(field, kind string, raw json.RawMessage, data 
 			problems.add("dashboard artifact data.dashboardId is not accepted; use dashboard_id")
 		}
 		dashboardID := jsonString(data["dashboard_id"])
-		if jsonKind(data["dashboard_id"]) != "string" || strings.TrimSpace(dashboardID) == "" || templateStringLength(dashboardID) > templateDashboardIDMax {
+		if jsonKind(data["dashboard_id"]) != "string" || isBlank(dashboardID) || templateStringLength(dashboardID) > templateDashboardIDMax {
 			problems.add("dashboard artifact data.dashboard_id is required")
 		}
 	}
 }
 
-// templateJSONLength approximates the JavaScript length of JSON.stringify for
-// the given JSON: compact output, with non-ASCII characters left unescaped.
+// isBlank matches Kibana's s.trim() === "" checks. JavaScript whitespace is
+// Unicode White_Space without U+0085, plus U+FEFF.
+func isBlank(value string) bool {
+	return strings.TrimFunc(value, func(r rune) bool {
+		return r == '\uFEFF' || (r != '\u0085' && unicode.IsSpace(r))
+	}) == ""
+}
+
+// templateJSONLength returns JSON.stringify(JSON.parse(raw)).length, the value
+// Kibana compares with MAX_ARTIFACT_DATA_BYTES. raw must be valid JSON.
 func templateJSONLength(raw json.RawMessage) int {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return 0
+	switch jsonKind(raw) {
+	case "object":
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return 0
+		}
+		length := 2 + max(len(obj)-1, 0)
+		for key, value := range obj {
+			// encoding/json decodes keys, so a lone surrogate in a key counts as U+FFFD.
+			length += jsStringifiedLength(utf16.Encode([]rune(key))) + 1 + templateJSONLength(value)
+		}
+		return length
+	case "array":
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return 0
+		}
+		length := 2 + max(len(items)-1, 0)
+		for _, item := range items {
+			length += templateJSONLength(item)
+		}
+		return length
+	case "string":
+		return jsStringifiedLength(jsonStringUnits(raw))
 	}
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
-		return 0
+	literal := string(bytes.TrimSpace(raw))
+	switch literal {
+	case "true", "false", "null":
+		return len(literal)
 	}
-	return templateStringLength(strings.TrimSuffix(buf.String(), "\n"))
+	number, _ := strconv.ParseFloat(literal, 64)
+	if math.IsInf(number, 0) {
+		return len("null")
+	}
+	return len(jsNumberString(number))
+}
+
+// jsonStringUnits decodes a JSON string literal into UTF-16 code units,
+// keeping lone surrogates that encoding/json would replace with U+FFFD.
+func jsonStringUnits(raw json.RawMessage) []uint16 {
+	literal := string(bytes.TrimSpace(raw))
+	literal = literal[1 : len(literal)-1]
+	escapes := map[byte]uint16{'"': '"', '\\': '\\', '/': '/', 'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t'}
+	var units []uint16
+	for i := 0; i < len(literal); {
+		if literal[i] != '\\' {
+			r, size := utf8.DecodeRuneInString(literal[i:])
+			units = utf16.AppendRune(units, r)
+			i += size
+			continue
+		}
+		if literal[i+1] == 'u' {
+			unit, _ := strconv.ParseUint(literal[i+2:i+6], 16, 16)
+			units = append(units, uint16(unit))
+			i += 6
+			continue
+		}
+		units = append(units, escapes[literal[i+1]])
+		i += 2
+	}
+	return units
+}
+
+// jsStringifiedLength returns the length of JSON.stringify for a string of
+// UTF-16 code units, including the quotes.
+func jsStringifiedLength(units []uint16) int {
+	length := 2
+	for i := 0; i < len(units); i++ {
+		unit := units[i]
+		switch {
+		case unit >= 0xD800 && unit <= 0xDBFF && i+1 < len(units) && units[i+1] >= 0xDC00 && units[i+1] <= 0xDFFF:
+			length += 2
+			i++
+		case unit >= 0xD800 && unit <= 0xDFFF:
+			length += len(`\ud800`)
+		case unit == '"' || unit == '\\' || unit == '\b' || unit == '\f' || unit == '\n' || unit == '\r' || unit == '\t':
+			length += 2
+		case unit < 0x20:
+			length += len(`\u0000`)
+		default:
+			length++
+		}
+	}
+	return length
+}
+
+// jsNumberString formats a number like JavaScript's Number.prototype.toString.
+func jsNumberString(number float64) string {
+	if number == 0 {
+		return "0"
+	}
+	sign := ""
+	if number < 0 {
+		sign, number = "-", -number
+	}
+	mantissa, exponent, _ := strings.Cut(strconv.FormatFloat(number, 'e', -1, 64), "e")
+	digits := strings.Replace(mantissa, ".", "", 1)
+	power, _ := strconv.Atoi(exponent)
+	k, n := len(digits), power+1
+	switch {
+	case k <= n && n <= 21:
+		return sign + digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		return sign + digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		return sign + "0." + strings.Repeat("0", -n) + digits
+	}
+	exp := "e+" + strconv.Itoa(n-1)
+	if n-1 < 0 {
+		exp = "e-" + strconv.Itoa(1-n)
+	}
+	if k == 1 {
+		return sign + digits + exp
+	}
+	return sign + digits[:1] + "." + digits[1:] + exp
 }
 
 // templateStringLength matches JavaScript String.length, which Kibana's schemas
